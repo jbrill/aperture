@@ -16,12 +16,23 @@ import (
 // behavior of the LndChallenger.
 type LndChallengerOption func(*LndChallenger)
 
+const defaultSettlementQueueSize = 100
+
 // WithSettlementCallback sets a callback that will be invoked when an invoice
 // is settled. This can be used to trigger side effects such as recording
 // transaction settlements.
 func WithSettlementCallback(fn func(hash lntypes.Hash)) LndChallengerOption {
 	return func(l *LndChallenger) {
 		l.onSettled = fn
+	}
+}
+
+// WithSettlementQueueSize sets the size of the settlement callback queue.
+func WithSettlementQueueSize(size int) LndChallengerOption {
+	return func(l *LndChallenger) {
+		if size > 0 {
+			l.settlementQueueSize = size
+		}
 	}
 }
 
@@ -49,6 +60,10 @@ type LndChallenger struct {
 	// settlementQueue is a buffered channel used to serialize settlement
 	// callbacks instead of spawning a goroutine per callback.
 	settlementQueue chan lntypes.Hash
+
+	// settlementQueueSize is the channel buffer size used for settlement
+	// callback serialization.
+	settlementQueueSize int
 
 	errChan chan<- error
 
@@ -79,16 +94,17 @@ func NewLndChallenger(client InvoiceClient, batchSize int,
 
 	invoicesMtx := &sync.Mutex{}
 	challenger := &LndChallenger{
-		client:        client,
-		batchSize:     batchSize,
-		clientCtx:     ctxFunc,
-		genInvoiceReq: genInvoiceReq,
-		invoiceStates: make(map[lntypes.Hash]lnrpc.Invoice_InvoiceState),
-		invoicesMtx:   invoicesMtx,
-		invoicesCond:  sync.NewCond(invoicesMtx),
-		quit:          make(chan struct{}),
-		errChan:       errChan,
-		strictVerify:  strictVerification,
+		client:              client,
+		batchSize:           batchSize,
+		clientCtx:           ctxFunc,
+		genInvoiceReq:       genInvoiceReq,
+		invoiceStates:       make(map[lntypes.Hash]lnrpc.Invoice_InvoiceState),
+		invoicesMtx:         invoicesMtx,
+		invoicesCond:        sync.NewCond(invoicesMtx),
+		quit:                make(chan struct{}),
+		errChan:             errChan,
+		strictVerify:        strictVerification,
+		settlementQueueSize: defaultSettlementQueueSize,
 	}
 
 	// Apply functional options.
@@ -99,7 +115,9 @@ func NewLndChallenger(client InvoiceClient, batchSize int,
 	// If a settlement callback is set, create a buffered channel to
 	// serialize settlement processing.
 	if challenger.onSettled != nil {
-		challenger.settlementQueue = make(chan lntypes.Hash, 100)
+		challenger.settlementQueue = make(
+			chan lntypes.Hash, challenger.settlementQueueSize,
+		)
 	}
 
 	err := challenger.Start()

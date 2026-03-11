@@ -20,6 +20,7 @@ var (
 	defaultLogLevel         = "info"
 	defaultLogFilename      = "aperture.log"
 	defaultInvoiceBatchSize = 100000
+	defaultSettlementQueue  = 1000
 	defaultStrictVerify     = false
 
 	defaultSqliteDatabaseFileName = "aperture.db"
@@ -151,6 +152,10 @@ type AdminConfig struct {
 	// MacaroonPath is the path where the admin macaroon will be written.
 	// Defaults to admin.macaroon in the aperture data directory.
 	MacaroonPath string `long:"macaroonpath" description:"Path to write the admin macaroon."`
+
+	// CORSOrigins controls which origins are allowed to call the admin REST
+	// API. If empty, CORS is disabled and browsers can only use same-origin.
+	CORSOrigins []string `long:"corsorigin" description:"Allowed CORS origins for the admin REST API."`
 }
 
 type Config struct {
@@ -238,6 +243,10 @@ type Config struct {
 	// request.
 	InvoiceBatchSize int `long:"invoicebatchsize" description:"The number of invoices to fetch in a single request."`
 
+	// SettlementQueueSize is the number of settled invoice hashes that can be
+	// queued while waiting for transaction-settlement callbacks.
+	SettlementQueueSize int `long:"settlementqueuesize" description:"Maximum number of settled invoice callbacks queued for processing."`
+
 	// StrictVerify is a flag that indicates whether we should verify the
 	// invoice status strictly or not. If set to true, then this requires
 	// all invoices to be read from disk at start up.
@@ -279,21 +288,22 @@ func DefaultSqliteConfig() *aperturedb.SqliteConfig {
 // NewConfig initializes a new Config variable.
 func NewConfig() *Config {
 	return &Config{
-		DatabaseBackend:  "etcd",
-		Etcd:             &EtcdConfig{},
-		Sqlite:           DefaultSqliteConfig(),
-		Postgres:         &aperturedb.PostgresConfig{},
-		Authenticator:    &AuthConfig{},
-		Tor:              &TorConfig{},
-		HashMail:         &HashMailConfig{},
-		Prometheus:       &PrometheusConfig{},
-		Admin:            &AdminConfig{},
-		IdleTimeout:      defaultIdleTimeout,
-		ReadTimeout:      defaultReadTimeout,
-		WriteTimeout:     defaultWriteTimeout,
-		InvoiceBatchSize: defaultInvoiceBatchSize,
-		Logging:          build.DefaultLogConfig(),
-		Blocklist:        []string{},
-		StrictVerify:     defaultStrictVerify,
+		DatabaseBackend:     "etcd",
+		Etcd:                &EtcdConfig{},
+		Sqlite:              DefaultSqliteConfig(),
+		Postgres:            &aperturedb.PostgresConfig{},
+		Authenticator:       &AuthConfig{},
+		Tor:                 &TorConfig{},
+		HashMail:            &HashMailConfig{},
+		Prometheus:          &PrometheusConfig{},
+		Admin:               &AdminConfig{},
+		IdleTimeout:         defaultIdleTimeout,
+		ReadTimeout:         defaultReadTimeout,
+		WriteTimeout:        defaultWriteTimeout,
+		InvoiceBatchSize:    defaultInvoiceBatchSize,
+		SettlementQueueSize: defaultSettlementQueue,
+		Logging:             build.DefaultLogConfig(),
+		Blocklist:           []string{},
+		StrictVerify:        defaultStrictVerify,
 	}
 }

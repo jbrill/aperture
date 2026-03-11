@@ -288,7 +288,9 @@ func (a *Aperture) Start(errChan chan error, shutdown <-chan struct{}) error {
 
 	log.Infof("Using %v as database backend", a.cfg.DatabaseBackend)
 
-	challengerOpts := buildChallengerOpts(txnStore)
+	challengerOpts := buildChallengerOpts(
+		txnStore, a.cfg.SettlementQueueSize,
+	)
 
 	if !a.cfg.Authenticator.Disable {
 		authCfg := a.cfg.Authenticator
@@ -862,10 +864,16 @@ func initTorListener(cfg *Config, store tor.OnionStore) (*tor.Controller,
 // store is provided, a settlement callback is added to mark transactions
 // as settled when invoices are paid.
 func buildChallengerOpts(
-	txnStore *aperturedb.L402TransactionsStore) []challenger.LndChallengerOption {
+	txnStore *aperturedb.L402TransactionsStore,
+	settlementQueueSize int) []challenger.LndChallengerOption {
 
 	var opts []challenger.LndChallengerOption
 	if txnStore != nil {
+		opts = append(
+			opts, challenger.WithSettlementQueueSize(
+				settlementQueueSize,
+			),
+		)
 		opts = append(opts, challenger.WithSettlementCallback(
 			func(hash lntypes.Hash) {
 				ctx, cancel := context.WithTimeout(
@@ -1030,7 +1038,7 @@ func createAdminServer(cfg *Config,
 		return nil, nil, err
 	}
 
-	corsHandler := allowCORS(mux, []string{"*"})
+	corsHandler := allowCORS(mux, cfg.Admin.CORSOrigins)
 	localServices = append(localServices, proxy.NewLocalService(
 		corsHandler, func(r *http.Request) bool {
 			return strings.HasPrefix(
@@ -1321,7 +1329,7 @@ func allowCORS(handler http.Handler, origins []string) http.Handler {
 			allowHeaders,
 			"Content-Type, Accept, Grpc-Metadata-Macaroon",
 		)
-		w.Header().Set(allowMethods, "GET, POST, DELETE")
+		w.Header().Set(allowMethods, "GET, POST, PUT, DELETE")
 
 		// Either we allow all origins or the incoming request matches
 		// a specific origin in our list of allowed origins.
