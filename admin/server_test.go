@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 )
 
 func newTestServer() *Server {
+	var mu sync.Mutex
 	services := []*proxy.Service{
 		{
 			Name:     "test-svc",
@@ -33,9 +35,15 @@ func newTestServer() *Server {
 		ListenAddr: "localhost:9090",
 		Insecure:   true,
 		Services: func() []*proxy.Service {
-			return services
+			mu.Lock()
+			defer mu.Unlock()
+			cpy := make([]*proxy.Service, len(services))
+			copy(cpy, services)
+			return cpy
 		},
 		UpdateServices: func(s []*proxy.Service) error {
+			mu.Lock()
+			defer mu.Unlock()
 			services = s
 			return nil
 		},
@@ -89,6 +97,7 @@ func newTestServerWithStores(t *testing.T) (*Server,
 	txStore := aperturedb.NewL402TransactionsStore(dbTxer)
 	secretStore := newMockSecretStore()
 
+	var mu sync.Mutex
 	svc := []*proxy.Service{
 		{
 			Name:     "test-svc",
@@ -105,9 +114,15 @@ func newTestServerWithStores(t *testing.T) (*Server,
 		TransactionStore: txStore,
 		SecretStore:      secretStore,
 		Services: func() []*proxy.Service {
-			return svc
+			mu.Lock()
+			defer mu.Unlock()
+			cpy := make([]*proxy.Service, len(svc))
+			copy(cpy, svc)
+			return cpy
 		},
 		UpdateServices: func(s []*proxy.Service) error {
+			mu.Lock()
+			defer mu.Unlock()
 			svc = s
 			return nil
 		},
@@ -237,6 +252,53 @@ func TestUpdateService(t *testing.T) {
 	require.Contains(t, err.Error(), "not found")
 }
 
+func TestUpdateServiceCanSetPriceToZero(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer()
+
+	price := int64(0)
+	svc, err := s.UpdateService(context.Background(),
+		&adminrpc.UpdateServiceRequest{
+			Name:  "test-svc",
+			Price: &price,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), svc.Price)
+}
+
+func TestCreateServiceRejectsInvalidAuth(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer()
+
+	_, err := s.CreateService(context.Background(),
+		&adminrpc.CreateServiceRequest{
+			Name:    "bad-auth-svc",
+			Address: "localhost:1234",
+			Auth:    "freebie -5",
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid freebie count")
+}
+
+func TestUpdateServiceRejectsInvalidAuth(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer()
+
+	_, err := s.UpdateService(context.Background(),
+		&adminrpc.UpdateServiceRequest{
+			Name: "test-svc",
+			Auth: "freebie -5",
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid freebie count")
+}
+
 func TestDeleteService(t *testing.T) {
 	t.Parallel()
 
@@ -314,7 +376,7 @@ func TestGetStatsDateRangeScopesTotals(t *testing.T) {
 	s, txStore, _ := newTestServerWithStores(t)
 
 	recordSettledTransaction(
-		t, txStore, []byte("token_stats"), []byte("hash_stats"), 500,
+		t, txStore, testTokenID(9000), testHash(9000), 500,
 	)
 
 	noRangeResp, err := s.GetStats(
@@ -336,18 +398,32 @@ func TestGetStatsDateRangeScopesTotals(t *testing.T) {
 	require.Len(t, rangeResp.ServiceBreakdown, 0)
 }
 
+// testTokenID returns a 32-byte token ID derived from an index.
+func testTokenID(i int) []byte {
+	id := make([]byte, l402.TokenIDSize)
+	copy(id, fmt.Sprintf("token-%04d", i))
+	return id
+}
+
+// testHash returns a 32-byte payment hash derived from an index.
+func testHash(i int) []byte {
+	h := make([]byte, lntypes.HashSize)
+	copy(h, fmt.Sprintf("hash-%04d", i))
+	return h
+}
+
 func TestRevokeTokenBeyondOldScanLimit(t *testing.T) {
 	t.Parallel()
 
 	s, txStore, secretStore := newTestServerWithStores(t)
 
-	targetTokenID := []byte("token-0000")
-	targetHash := []byte("hash-0000")
+	targetTokenID := testTokenID(0)
+	targetHash := testHash(0)
 
 	for i := 0; i < 1001; i++ {
-		tokenID := []byte(fmt.Sprintf("token-%04d", i))
-		hash := []byte(fmt.Sprintf("hash-%04d", i))
-		recordSettledTransaction(t, txStore, tokenID, hash, 10)
+		recordSettledTransaction(
+			t, txStore, testTokenID(i), testHash(i), 10,
+		)
 	}
 
 	resp, err := s.RevokeToken(context.Background(),
@@ -374,4 +450,30 @@ func TestRevokeTokenBeyondOldScanLimit(t *testing.T) {
 	idHash := sha256.Sum256(idBytes)
 	_, ok := secretStore.revoked[idHash]
 	require.True(t, ok)
+}
+
+func TestListTokensPagination(t *testing.T) {
+	t.Parallel()
+
+	s, txStore, _ := newTestServerWithStores(t)
+
+	for i := 0; i < 3; i++ {
+		recordSettledTransaction(
+			t, txStore, testTokenID(8000+i), testHash(8000+i), 10,
+		)
+	}
+
+	resp, err := s.ListTokens(context.Background(), &adminrpc.ListTokensRequest{
+		Limit:  2,
+		Offset: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Tokens, 2)
+
+	resp, err = s.ListTokens(context.Background(), &adminrpc.ListTokensRequest{
+		Limit:  2,
+		Offset: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Tokens, 1)
 }

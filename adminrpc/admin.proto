@@ -60,7 +60,7 @@ message UpdateServiceRequest {
   string protocol = 3;
   string host_regexp = 4;
   string path_regexp = 5;
-  int64 price = 6;
+  optional int64 price = 6;
   string auth = 7;
 }
 
@@ -90,7 +90,10 @@ message Transaction {
   string settled_at = 8;
 }
 
-message ListTokensRequest {}
+message ListTokensRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
 
 message ListTokensResponse { repeated Transaction tokens = 1; }
 

@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lightninglabs/aperture/adminrpc"
@@ -62,7 +64,8 @@ type ServerConfig struct {
 type Server struct {
 	adminrpc.UnimplementedAdminServer
 
-	cfg ServerConfig
+	cfg         ServerConfig
+	servicesMtx sync.RWMutex
 }
 
 // NewServer creates a new admin gRPC server with the given configuration.
@@ -95,6 +98,9 @@ func (s *Server) ListServices(_ context.Context,
 	_ *adminrpc.ListServicesRequest) (
 	*adminrpc.ListServicesResponse, error) {
 
+	s.servicesMtx.RLock()
+	defer s.servicesMtx.RUnlock()
+
 	services := s.cfg.Services()
 	resp := make([]*adminrpc.Service, 0, len(services))
 
@@ -117,6 +123,9 @@ func (s *Server) ListServices(_ context.Context,
 func (s *Server) CreateService(_ context.Context,
 	req *adminrpc.CreateServiceRequest) (*adminrpc.Service, error) {
 
+	s.servicesMtx.Lock()
+	defer s.servicesMtx.Unlock()
+
 	if req.Name == "" {
 		return nil, status.Error(
 			codes.InvalidArgument, "name is required",
@@ -132,10 +141,31 @@ func (s *Server) CreateService(_ context.Context,
 	if protocol == "" {
 		protocol = defaultProtocol
 	}
+	if protocol != defaultProtocol && protocol != "https" {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"protocol must be 'http' or 'https', got %q",
+			protocol,
+		)
+	}
 
 	hostRegexp := req.HostRegexp
 	if hostRegexp == "" {
 		hostRegexp = ".*"
+	}
+	if _, err := regexp.Compile(hostRegexp); err != nil {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"invalid host_regexp: %v", err,
+		)
+	}
+	if req.PathRegexp != "" {
+		if _, err := regexp.Compile(req.PathRegexp); err != nil {
+			return nil, status.Errorf(
+				codes.InvalidArgument,
+				"invalid path_regexp: %v", err,
+			)
+		}
 	}
 
 	if req.Price < 0 {
@@ -144,8 +174,11 @@ func (s *Server) CreateService(_ context.Context,
 		)
 	}
 
+	var normalizedAuth string
 	if req.Auth != "" {
-		if err := validateAuthLevel(req.Auth); err != nil {
+		var err error
+		normalizedAuth, err = validateAuthLevel(req.Auth)
+		if err != nil {
 			return nil, status.Error(
 				codes.InvalidArgument, err.Error(),
 			)
@@ -170,8 +203,8 @@ func (s *Server) CreateService(_ context.Context,
 		PathRegexp: req.PathRegexp,
 		Price:      req.Price,
 	}
-	if req.Auth != "" {
-		newSvc.Auth = auth.Level(req.Auth)
+	if normalizedAuth != "" {
+		newSvc.Auth = auth.Level(normalizedAuth)
 	}
 
 	services = append(services, newSvc)
@@ -197,6 +230,9 @@ func (s *Server) CreateService(_ context.Context,
 func (s *Server) UpdateService(_ context.Context,
 	req *adminrpc.UpdateServiceRequest) (*adminrpc.Service, error) {
 
+	s.servicesMtx.Lock()
+	defer s.servicesMtx.Unlock()
+
 	if req.Name == "" {
 		return nil, status.Error(
 			codes.InvalidArgument, "missing service name",
@@ -218,23 +254,65 @@ func (s *Server) UpdateService(_ context.Context,
 		)
 	}
 
+	// Build an updated copy rather than mutating the original in place,
+	// so the shared pointer is not corrupted if UpdateServices fails.
+	updated := *found
 	if req.Address != "" {
-		found.Address = req.Address
+		updated.Address = req.Address
 	}
 	if req.Protocol != "" {
-		found.Protocol = req.Protocol
+		if req.Protocol != defaultProtocol && req.Protocol != "https" {
+			return nil, status.Errorf(
+				codes.InvalidArgument,
+				"protocol must be 'http' or 'https', "+
+					"got %q", req.Protocol,
+			)
+		}
+		updated.Protocol = req.Protocol
 	}
 	if req.HostRegexp != "" {
-		found.HostRegexp = req.HostRegexp
+		if _, err := regexp.Compile(req.HostRegexp); err != nil {
+			return nil, status.Errorf(
+				codes.InvalidArgument,
+				"invalid host_regexp: %v", err,
+			)
+		}
+		updated.HostRegexp = req.HostRegexp
 	}
 	if req.PathRegexp != "" {
-		found.PathRegexp = req.PathRegexp
+		if _, err := regexp.Compile(req.PathRegexp); err != nil {
+			return nil, status.Errorf(
+				codes.InvalidArgument,
+				"invalid path_regexp: %v", err,
+			)
+		}
+		updated.PathRegexp = req.PathRegexp
 	}
-	if req.Price != 0 {
-		found.Price = req.Price
+	if req.Price != nil {
+		if req.GetPrice() < 0 {
+			return nil, status.Error(
+				codes.InvalidArgument,
+				"price must be >= 0",
+			)
+		}
+		updated.Price = req.GetPrice()
 	}
 	if req.Auth != "" {
-		found.Auth = auth.Level(req.Auth)
+		normalizedAuth, err := validateAuthLevel(req.Auth)
+		if err != nil {
+			return nil, status.Error(
+				codes.InvalidArgument, err.Error(),
+			)
+		}
+		updated.Auth = auth.Level(normalizedAuth)
+	}
+
+	// Replace the pointer in the slice with the updated copy.
+	for i, svc := range services {
+		if svc.Name == req.Name {
+			services[i] = &updated
+			break
+		}
 	}
 
 	if err := s.cfg.UpdateServices(services); err != nil {
@@ -245,13 +323,13 @@ func (s *Server) UpdateService(_ context.Context,
 	}
 
 	return &adminrpc.Service{
-		Name:       found.Name,
-		Address:    found.Address,
-		Protocol:   found.Protocol,
-		HostRegexp: found.HostRegexp,
-		PathRegexp: found.PathRegexp,
-		Price:      found.Price,
-		Auth:       string(found.Auth),
+		Name:       updated.Name,
+		Address:    updated.Address,
+		Protocol:   updated.Protocol,
+		HostRegexp: updated.HostRegexp,
+		PathRegexp: updated.PathRegexp,
+		Price:      updated.Price,
+		Auth:       string(updated.Auth),
 	}, nil
 }
 
@@ -259,6 +337,9 @@ func (s *Server) UpdateService(_ context.Context,
 func (s *Server) DeleteService(_ context.Context,
 	req *adminrpc.DeleteServiceRequest) (
 	*adminrpc.DeleteServiceResponse, error) {
+
+	s.servicesMtx.Lock()
+	defer s.servicesMtx.Unlock()
 
 	if req.Name == "" {
 		return nil, status.Error(
@@ -314,6 +395,38 @@ func (s *Server) ListTransactions(ctx context.Context,
 	}
 
 	offset := req.Offset
+	if offset < 0 {
+		return nil, status.Error(
+			codes.InvalidArgument, "offset must be >= 0",
+		)
+	}
+
+	// Ensure at most one filter is set to avoid silently dropping
+	// filters.
+	filterCount := 0
+	if req.Service != "" {
+		filterCount++
+	}
+	if req.State != "" {
+		filterCount++
+	}
+	if req.StartDate != "" || req.EndDate != "" {
+		if req.StartDate == "" || req.EndDate == "" {
+			return nil, status.Error(
+				codes.InvalidArgument,
+				"both start_date and end_date must be "+
+					"set together",
+			)
+		}
+		filterCount++
+	}
+	if filterCount > 1 {
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"only one filter (service, state, or date range) "+
+				"may be set at a time",
+		)
+	}
 
 	var (
 		txns []aperturedb.L402Transaction
@@ -356,6 +469,12 @@ func (s *Server) ListTransactions(ctx context.Context,
 				"invalid end_date format",
 			)
 		}
+		if to.Before(from) {
+			return nil, status.Error(
+				codes.InvalidArgument,
+				"end_date must be >= start_date",
+			)
+		}
 		txns, err = s.cfg.TransactionStore.ListByDateRange(
 			ctx, from, to, limit, offset,
 		)
@@ -380,7 +499,7 @@ func (s *Server) ListTransactions(ctx context.Context,
 
 // ListTokens returns settled transactions representing active L402 tokens.
 func (s *Server) ListTokens(ctx context.Context,
-	_ *adminrpc.ListTokensRequest) (
+	req *adminrpc.ListTokensRequest) (
 	*adminrpc.ListTokensResponse, error) {
 
 	if s.cfg.TransactionStore == nil {
@@ -390,8 +509,23 @@ func (s *Server) ListTokens(ctx context.Context,
 		)
 	}
 
+	limit := int32(defaultLimit)
+	if req.Limit > 0 {
+		limit = req.Limit
+		if limit > maxLimit {
+			limit = maxLimit
+		}
+	}
+
+	offset := req.Offset
+	if offset < 0 {
+		return nil, status.Error(
+			codes.InvalidArgument, "offset must be >= 0",
+		)
+	}
+
 	txns, err := s.cfg.TransactionStore.ListByState(
-		ctx, "settled", int32(maxLimit), 0,
+		ctx, "settled", limit, offset,
 	)
 	if err != nil {
 		log.Errorf("Error listing tokens: %v", err)
@@ -428,6 +562,13 @@ func (s *Server) RevokeToken(ctx context.Context,
 	if err != nil {
 		return nil, status.Error(
 			codes.InvalidArgument, "invalid token ID",
+		)
+	}
+	if len(tokenID) != l402.TokenIDSize {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			"token ID must be %d bytes, got %d",
+			l402.TokenIDSize, len(tokenID),
 		)
 	}
 
@@ -593,6 +734,15 @@ func revokeSecretByTokenIDAndHash(ctx context.Context,
 	secretStore mint.SecretStore,
 	tokenID, paymentHash []byte) error {
 
+	if len(paymentHash) != lntypes.HashSize {
+		return fmt.Errorf("payment hash must be %d bytes, got %d",
+			lntypes.HashSize, len(paymentHash))
+	}
+	if len(tokenID) != l402.TokenIDSize {
+		return fmt.Errorf("token ID must be %d bytes, got %d",
+			l402.TokenIDSize, len(tokenID))
+	}
+
 	var hash lntypes.Hash
 	copy(hash[:], paymentHash)
 
@@ -630,31 +780,32 @@ func txnsToProto(txns []aperturedb.L402Transaction) []*adminrpc.Transaction {
 	return resp
 }
 
-// validateAuthLevel checks that an auth string is a valid auth.Level value.
-func validateAuthLevel(s string) error {
+// validateAuthLevel checks that an auth string is a valid auth.Level value
+// and returns the normalized (lowercased) form.
+func validateAuthLevel(s string) (string, error) {
 	lower := strings.ToLower(s)
 
 	switch {
 	case lower == "on" || lower == "off" || lower == "true" ||
 		lower == "false" || lower == "":
 
-		return nil
+		return lower, nil
 
 	case strings.HasPrefix(lower, "freebie "):
 		parts := strings.SplitN(lower, " ", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid auth format, use " +
+			return "", fmt.Errorf("invalid auth format, use " +
 				"'freebie N'")
 		}
 		n, err := strconv.Atoi(parts[1])
 		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid freebie count, must " +
+			return "", fmt.Errorf("invalid freebie count, must " +
 				"be a positive integer")
 		}
-		return nil
+		return lower, nil
 
 	default:
-		return fmt.Errorf("invalid auth level %q, must be 'on', "+
-			"'off', or 'freebie N'", s)
+		return "", fmt.Errorf("invalid auth level %q, must be "+
+			"'on', 'off', or 'freebie N'", s)
 	}
 }
