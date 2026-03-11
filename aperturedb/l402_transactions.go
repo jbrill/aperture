@@ -39,6 +39,14 @@ type (
 	// revenue by service within a date range.
 	RevenueByServiceAndDateRangeParams = sqlc.GetL402RevenueByServiceAndDateRangeParams
 
+	// CountByDateRangeParams contains parameters for counting settled
+	// transactions within a settlement-time date range.
+	CountByDateRangeParams = sqlc.CountL402TransactionsByDateRangeParams
+
+	// TotalRevenueByDateRangeParams contains parameters for querying total
+	// settled revenue within a date range.
+	TotalRevenueByDateRangeParams = sqlc.GetL402TotalRevenueByDateRangeParams
+
 	// RevenueByServiceRow contains a service name and its total revenue.
 	RevenueByServiceRow = sqlc.GetL402RevenueByServiceRow
 
@@ -73,6 +81,11 @@ type L402TransactionsDB interface {
 	GetL402TransactionByIdentifierHash(ctx context.Context,
 		identifierHash []byte) (L402Transaction, error)
 
+	// GetL402SettledTransactionByTokenID returns the settled transaction
+	// matching the given token ID.
+	GetL402SettledTransactionByTokenID(ctx context.Context,
+		tokenID []byte) (L402Transaction, error)
+
 	// ListL402Transactions returns a paginated list of all transactions,
 	// ordered by created_at DESC.
 	ListL402Transactions(ctx context.Context,
@@ -93,13 +106,19 @@ type L402TransactionsDB interface {
 	ListL402TransactionsByDateRange(ctx context.Context,
 		arg ListL402TxByDateRangeParams) ([]L402Transaction, error)
 
-	// CountL402Transactions returns the total number of transactions.
+	// CountL402Transactions returns the total number of settled
+	// transactions.
 	CountL402Transactions(ctx context.Context) (int64, error)
 
 	// CountL402TransactionsByService returns the number of transactions
 	// for a given service.
 	CountL402TransactionsByService(ctx context.Context,
 		serviceName string) (int64, error)
+
+	// CountL402TransactionsByDateRange returns the total number of
+	// settled transactions within a settlement-time date range.
+	CountL402TransactionsByDateRange(ctx context.Context,
+		arg CountByDateRangeParams) (int64, error)
 
 	// GetL402RevenueByService returns the total settled revenue grouped
 	// by service name.
@@ -114,7 +133,12 @@ type L402TransactionsDB interface {
 
 	// GetL402TotalRevenue returns the total settled revenue across all
 	// services.
-	GetL402TotalRevenue(ctx context.Context) (interface{}, error)
+	GetL402TotalRevenue(ctx context.Context) (int64, error)
+
+	// GetL402TotalRevenueByDateRange returns the total settled revenue
+	// across all services within a date range.
+	GetL402TotalRevenueByDateRange(ctx context.Context,
+		arg TotalRevenueByDateRangeParams) (int64, error)
 
 	// DeleteL402TransactionByTokenID deletes a transaction by its
 	// token ID.
@@ -179,7 +203,7 @@ func (s *L402TransactionsStore) RecordTransaction(ctx context.Context,
 			TokenID:        tokenID,
 			PaymentHash:    paymentHash,
 			ServiceName:    serviceName,
-			PriceSats:      int32(priceSats),
+			PriceSats:      priceSats,
 			State:          "pending",
 			CreatedAt:      s.clock.Now().UTC(),
 			IdentifierHash: identifierHash,
@@ -339,8 +363,8 @@ func (s *L402TransactionsStore) GetRevenueStats(ctx context.Context,
 
 		dateRows, err := tx.GetL402RevenueByServiceAndDateRange(
 			ctx, RevenueByServiceAndDateRangeParams{
-				CreatedAt:   from,
-				CreatedAt_2: to,
+				SettledAt:   from,
+				SettledAt_2: to,
 			},
 		)
 		if err != nil {
@@ -370,23 +394,9 @@ func (s *L402TransactionsStore) GetTotalRevenue(
 	var total int64
 	readOpts := NewL402TransactionsDBReadTx()
 	err := s.db.ExecTx(ctx, &readOpts, func(tx L402TransactionsDB) error {
-		result, err := tx.GetL402TotalRevenue(ctx)
-		if err != nil {
-			return err
-		}
-
-		// The COALESCE returns an interface{}, so we need to type
-		// assert.
-		switch v := result.(type) {
-		case int64:
-			total = v
-		case int32:
-			total = int64(v)
-		default:
-			total = 0
-		}
-
-		return nil
+		var err error
+		total, err = tx.GetL402TotalRevenue(ctx)
+		return err
 	})
 
 	if err != nil {
@@ -397,7 +407,33 @@ func (s *L402TransactionsStore) GetTotalRevenue(
 	return total, nil
 }
 
-// CountTransactions returns the total number of transactions.
+// GetTotalRevenueByDateRange returns the total settled revenue across all
+// services within a date range.
+func (s *L402TransactionsStore) GetTotalRevenueByDateRange(
+	ctx context.Context, from, to time.Time) (int64, error) {
+
+	var total int64
+	readOpts := NewL402TransactionsDBReadTx()
+	err := s.db.ExecTx(ctx, &readOpts, func(tx L402TransactionsDB) error {
+		var err error
+		total, err = tx.GetL402TotalRevenueByDateRange(
+			ctx, TotalRevenueByDateRangeParams{
+				SettledAt:   from,
+				SettledAt_2: to,
+			},
+		)
+		return err
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("unable to get L402 total revenue by "+
+			"date range: %w", err)
+	}
+
+	return total, nil
+}
+
+// CountTransactions returns the total number of settled transactions.
 func (s *L402TransactionsStore) CountTransactions(
 	ctx context.Context) (int64, error) {
 
@@ -415,6 +451,52 @@ func (s *L402TransactionsStore) CountTransactions(
 	}
 
 	return count, nil
+}
+
+// CountTransactionsByDateRange returns the total number of settled
+// transactions within a settlement-time date range.
+func (s *L402TransactionsStore) CountTransactionsByDateRange(
+	ctx context.Context, from, to time.Time) (int64, error) {
+
+	var count int64
+	readOpts := NewL402TransactionsDBReadTx()
+	err := s.db.ExecTx(ctx, &readOpts, func(tx L402TransactionsDB) error {
+		var err error
+		count, err = tx.CountL402TransactionsByDateRange(
+			ctx, CountByDateRangeParams{
+				SettledAt:   from,
+				SettledAt_2: to,
+			},
+		)
+		return err
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("unable to count L402 transactions by "+
+			"date range: %w", err)
+	}
+
+	return count, nil
+}
+
+// GetSettledByTokenID returns the settled transaction for the given token ID.
+func (s *L402TransactionsStore) GetSettledByTokenID(ctx context.Context,
+	tokenID []byte) (L402Transaction, error) {
+
+	var txn L402Transaction
+	readOpts := NewL402TransactionsDBReadTx()
+	err := s.db.ExecTx(ctx, &readOpts, func(tx L402TransactionsDB) error {
+		var err error
+		txn, err = tx.GetL402SettledTransactionByTokenID(ctx, tokenID)
+		return err
+	})
+
+	if err != nil {
+		return L402Transaction{}, fmt.Errorf("unable to get settled "+
+			"L402 transaction by token_id(%x): %w", tokenID, err)
+	}
+
+	return txn, nil
 }
 
 // DeleteByTokenID deletes a transaction by its token ID.

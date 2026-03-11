@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/lightningnetwork/lnd/clock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -293,4 +295,153 @@ func TestDeleteByTokenID(t *testing.T) {
 	txns, err = store.ListTransactions(ctxt, 50, 0)
 	require.NoError(t, err)
 	require.Len(t, txns, 0)
+}
+
+func TestRecordTransactionLargePriceSats(t *testing.T) {
+	db := NewTestDB(t)
+	store := newL402TransactionsStoreWithDB(db.BaseDB)
+
+	ctxt, cancel := context.WithTimeout(
+		context.Background(), defaultTestTimeout,
+	)
+	defer cancel()
+
+	largePrice := int64(math.MaxInt32) + 12345
+	tokenID := []byte("token_large_price______________")
+	hash := []byte("hash_large_price_______________")
+
+	err := store.RecordTransaction(
+		ctxt, tokenID, hash, "svc", largePrice, nil,
+	)
+	require.NoError(t, err)
+
+	txns, err := store.ListTransactions(ctxt, 50, 0)
+	require.NoError(t, err)
+	require.Len(t, txns, 1)
+	require.Equal(t, largePrice, txns[0].PriceSats)
+}
+
+func TestGetSettledByTokenID(t *testing.T) {
+	db := NewTestDB(t)
+	store := newL402TransactionsStoreWithDB(db.BaseDB)
+
+	ctxt, cancel := context.WithTimeout(
+		context.Background(), defaultTestTimeout,
+	)
+	defer cancel()
+
+	tokenID := []byte("token_get_by_id_______________")
+	hash := []byte("hash_get_by_id________________")
+
+	err := store.RecordTransaction(
+		ctxt, tokenID, hash, "svc", 100, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SettleTransaction(ctxt, hash))
+
+	txn, err := store.GetSettledByTokenID(ctxt, tokenID)
+	require.NoError(t, err)
+	require.Equal(t, int64(100), txn.PriceSats)
+	require.Equal(t, "settled", txn.State)
+}
+
+func TestDateRangeAggregates(t *testing.T) {
+	db := NewTestDB(t)
+	store := newL402TransactionsStoreWithDB(db.BaseDB)
+
+	ctxt, cancel := context.WithTimeout(
+		context.Background(), defaultTestTimeout,
+	)
+	defer cancel()
+
+	tokenID := []byte("token_range___________________")
+	hash := []byte("hash_range____________________")
+
+	err := store.RecordTransaction(
+		ctxt, tokenID, hash, "svc", 750, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SettleTransaction(ctxt, hash))
+
+	pastFrom := time.Now().UTC().Add(-time.Hour)
+	pastTo := time.Now().UTC().Add(time.Hour)
+
+	total, err := store.GetTotalRevenueByDateRange(ctxt, pastFrom, pastTo)
+	require.NoError(t, err)
+	require.Equal(t, int64(750), total)
+
+	count, err := store.CountTransactionsByDateRange(ctxt, pastFrom, pastTo)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+
+	futureFrom := time.Now().UTC().Add(24 * time.Hour)
+	futureTo := futureFrom.Add(time.Hour)
+
+	total, err = store.GetTotalRevenueByDateRange(
+		ctxt, futureFrom, futureTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), total)
+
+	count, err = store.CountTransactionsByDateRange(
+		ctxt, futureFrom, futureTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), count)
+}
+
+func TestDateRangeAggregatesUseSettledAt(t *testing.T) {
+	db := NewTestDB(t)
+	store := newL402TransactionsStoreWithDB(db.BaseDB)
+
+	createdAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	settledAt := createdAt.Add(48 * time.Hour)
+	testClock := clock.NewTestClock(createdAt)
+	store.clock = testClock
+
+	ctxt, cancel := context.WithTimeout(
+		context.Background(), defaultTestTimeout,
+	)
+	defer cancel()
+
+	tokenID := []byte("token_settle_range____________")
+	hash := []byte("hash_settle_range_____________")
+
+	err := store.RecordTransaction(
+		ctxt, tokenID, hash, "svc", 900, nil,
+	)
+	require.NoError(t, err)
+
+	testClock.SetTime(settledAt)
+	require.NoError(t, store.SettleTransaction(ctxt, hash))
+
+	createdWindowFrom := createdAt.Add(-time.Hour)
+	createdWindowTo := createdAt.Add(time.Hour)
+
+	total, err := store.GetTotalRevenueByDateRange(
+		ctxt, createdWindowFrom, createdWindowTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), total)
+
+	count, err := store.CountTransactionsByDateRange(
+		ctxt, createdWindowFrom, createdWindowTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), count)
+
+	settledWindowFrom := settledAt.Add(-time.Hour)
+	settledWindowTo := settledAt.Add(time.Hour)
+
+	total, err = store.GetTotalRevenueByDateRange(
+		ctxt, settledWindowFrom, settledWindowTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(900), total)
+
+	count, err = store.CountTransactionsByDateRange(
+		ctxt, settledWindowFrom, settledWindowTo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
 }

@@ -12,11 +12,31 @@ import (
 )
 
 const countL402Transactions = `-- name: CountL402Transactions :one
-SELECT count(*) FROM l402_transactions
+SELECT count(*)
+FROM l402_transactions
+WHERE state = 'settled'
 `
 
 func (q *Queries) CountL402Transactions(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countL402Transactions)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countL402TransactionsByDateRange = `-- name: CountL402TransactionsByDateRange :one
+SELECT count(*)
+FROM l402_transactions
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2
+`
+
+type CountL402TransactionsByDateRangeParams struct {
+	SettledAt   time.Time
+	SettledAt_2 time.Time
+}
+
+func (q *Queries) CountL402TransactionsByDateRange(ctx context.Context, arg CountL402TransactionsByDateRangeParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countL402TransactionsByDateRange, arg.SettledAt, arg.SettledAt_2)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -49,7 +69,7 @@ func (q *Queries) DeleteL402TransactionByTokenID(ctx context.Context, tokenID []
 }
 
 const getL402RevenueByService = `-- name: GetL402RevenueByService :many
-SELECT service_name, COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT service_name, CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
 WHERE state = 'settled'
 GROUP BY service_name
@@ -57,7 +77,7 @@ GROUP BY service_name
 
 type GetL402RevenueByServiceRow struct {
 	ServiceName  string
-	TotalRevenue interface{}
+	TotalRevenue int64
 }
 
 func (q *Queries) GetL402RevenueByService(ctx context.Context) ([]GetL402RevenueByServiceRow, error) {
@@ -84,24 +104,24 @@ func (q *Queries) GetL402RevenueByService(ctx context.Context) ([]GetL402Revenue
 }
 
 const getL402RevenueByServiceAndDateRange = `-- name: GetL402RevenueByServiceAndDateRange :many
-SELECT service_name, COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT service_name, CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
-WHERE state = 'settled' AND created_at >= $1 AND created_at <= $2
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2
 GROUP BY service_name
 `
 
 type GetL402RevenueByServiceAndDateRangeParams struct {
-	CreatedAt   time.Time
-	CreatedAt_2 time.Time
+	SettledAt   time.Time
+	SettledAt_2 time.Time
 }
 
 type GetL402RevenueByServiceAndDateRangeRow struct {
 	ServiceName  string
-	TotalRevenue interface{}
+	TotalRevenue int64
 }
 
 func (q *Queries) GetL402RevenueByServiceAndDateRange(ctx context.Context, arg GetL402RevenueByServiceAndDateRangeParams) ([]GetL402RevenueByServiceAndDateRangeRow, error) {
-	rows, err := q.db.QueryContext(ctx, getL402RevenueByServiceAndDateRange, arg.CreatedAt, arg.CreatedAt_2)
+	rows, err := q.db.QueryContext(ctx, getL402RevenueByServiceAndDateRange, arg.SettledAt, arg.SettledAt_2)
 	if err != nil {
 		return nil, err
 	}
@@ -123,15 +143,56 @@ func (q *Queries) GetL402RevenueByServiceAndDateRange(ctx context.Context, arg G
 	return items, nil
 }
 
+const getL402SettledTransactionByTokenID = `-- name: GetL402SettledTransactionByTokenID :one
+SELECT id, token_id, payment_hash, service_name, price_sats, state, created_at, settled_at, identifier_hash
+FROM l402_transactions
+WHERE token_id = $1 AND state = 'settled'
+`
+
+func (q *Queries) GetL402SettledTransactionByTokenID(ctx context.Context, tokenID []byte) (L402Transaction, error) {
+	row := q.db.QueryRowContext(ctx, getL402SettledTransactionByTokenID, tokenID)
+	var i L402Transaction
+	err := row.Scan(
+		&i.ID,
+		&i.TokenID,
+		&i.PaymentHash,
+		&i.ServiceName,
+		&i.PriceSats,
+		&i.State,
+		&i.CreatedAt,
+		&i.SettledAt,
+		&i.IdentifierHash,
+	)
+	return i, err
+}
+
 const getL402TotalRevenue = `-- name: GetL402TotalRevenue :one
-SELECT COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
 WHERE state = 'settled'
 `
 
-func (q *Queries) GetL402TotalRevenue(ctx context.Context) (interface{}, error) {
+func (q *Queries) GetL402TotalRevenue(ctx context.Context) (int64, error) {
 	row := q.db.QueryRowContext(ctx, getL402TotalRevenue)
-	var total_revenue interface{}
+	var total_revenue int64
+	err := row.Scan(&total_revenue)
+	return total_revenue, err
+}
+
+const getL402TotalRevenueByDateRange = `-- name: GetL402TotalRevenueByDateRange :one
+SELECT CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
+FROM l402_transactions
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2
+`
+
+type GetL402TotalRevenueByDateRangeParams struct {
+	SettledAt   time.Time
+	SettledAt_2 time.Time
+}
+
+func (q *Queries) GetL402TotalRevenueByDateRange(ctx context.Context, arg GetL402TotalRevenueByDateRangeParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getL402TotalRevenueByDateRange, arg.SettledAt, arg.SettledAt_2)
+	var total_revenue int64
 	err := row.Scan(&total_revenue)
 	return total_revenue, err
 }
@@ -211,7 +272,7 @@ type InsertL402TransactionParams struct {
 	TokenID        []byte
 	PaymentHash    []byte
 	ServiceName    string
-	PriceSats      int32
+	PriceSats      int64
 	State          string
 	CreatedAt      time.Time
 	IdentifierHash []byte

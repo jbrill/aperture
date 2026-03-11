@@ -44,34 +44,51 @@ ORDER BY created_at DESC
 LIMIT $3 OFFSET $4;
 
 -- name: CountL402Transactions :one
-SELECT count(*) FROM l402_transactions;
+SELECT count(*)
+FROM l402_transactions
+WHERE state = 'settled';
 
 -- name: CountL402TransactionsByService :one
 SELECT count(*)
 FROM l402_transactions
 WHERE service_name = $1;
 
+-- name: CountL402TransactionsByDateRange :one
+SELECT count(*)
+FROM l402_transactions
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2;
+
 -- name: GetL402RevenueByService :many
-SELECT service_name, COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT service_name, CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
 WHERE state = 'settled'
 GROUP BY service_name;
 
 -- name: GetL402RevenueByServiceAndDateRange :many
-SELECT service_name, COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT service_name, CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
-WHERE state = 'settled' AND created_at >= $1 AND created_at <= $2
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2
 GROUP BY service_name;
 
 -- name: GetL402TotalRevenue :one
-SELECT COALESCE(SUM(price_sats), 0) AS total_revenue
+SELECT CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
 FROM l402_transactions
 WHERE state = 'settled';
+
+-- name: GetL402TotalRevenueByDateRange :one
+SELECT CAST(COALESCE(SUM(price_sats), 0) AS BIGINT) AS total_revenue
+FROM l402_transactions
+WHERE state = 'settled' AND settled_at >= $1 AND settled_at <= $2;
 
 -- name: GetL402TransactionByIdentifierHash :one
 SELECT *
 FROM l402_transactions
 WHERE identifier_hash = $1;
+
+-- name: GetL402SettledTransactionByTokenID :one
+SELECT *
+FROM l402_transactions
+WHERE token_id = $1 AND state = 'settled';
 
 -- name: DeleteL402TransactionByTokenID :execrows
 DELETE FROM l402_transactions

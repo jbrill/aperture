@@ -3,7 +3,9 @@ package admin
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -430,40 +432,27 @@ func (s *Server) RevokeToken(ctx context.Context,
 	}
 
 	// Look up the transaction to get the payment hash.
-	txns, err := s.cfg.TransactionStore.ListByState(
-		ctx, "settled", int32(maxLimit), 0,
-	)
+	txn, err := s.cfg.TransactionStore.GetSettledByTokenID(ctx, tokenID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, status.Error(
+				codes.NotFound, "token not found",
+			)
+		}
+
 		log.Errorf("Error looking up token: %v", err)
 		return nil, status.Error(
 			codes.Internal, "failed to look up token",
 		)
 	}
 
-	found := false
-	for _, txn := range txns {
-		if hex.EncodeToString(txn.TokenID) != req.TokenId {
-			continue
-		}
-
-		err = revokeSecretByTokenIDAndHash(
-			ctx, s.cfg.SecretStore,
-			txn.TokenID, txn.PaymentHash,
-		)
-		if err != nil {
-			log.Errorf("Error revoking secret: %v", err)
-			return nil, status.Error(
-				codes.Internal, "failed to revoke token",
-			)
-		}
-
-		found = true
-		break
-	}
-
-	if !found {
+	err = revokeSecretByTokenIDAndHash(
+		ctx, s.cfg.SecretStore, txn.TokenID, txn.PaymentHash,
+	)
+	if err != nil {
+		log.Errorf("Error revoking secret: %v", err)
 		return nil, status.Error(
-			codes.NotFound, "token not found",
+			codes.Internal, "failed to revoke token",
 		)
 	}
 
@@ -492,7 +481,16 @@ func (s *Server) GetStats(ctx context.Context,
 	}
 
 	var from, to time.Time
-	if req.From != "" {
+	hasFrom := req.From != ""
+	hasTo := req.To != ""
+	if hasFrom != hasTo {
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"both 'from' and 'to' must be set together",
+		)
+	}
+
+	if hasFrom {
 		var err error
 		from, err = time.Parse(time.RFC3339, req.From)
 		if err != nil {
@@ -501,9 +499,7 @@ func (s *Server) GetStats(ctx context.Context,
 				"invalid 'from' time format",
 			)
 		}
-	}
-	if req.To != "" {
-		var err error
+
 		to, err = time.Parse(time.RFC3339, req.To)
 		if err != nil {
 			return nil, status.Error(
@@ -511,22 +507,57 @@ func (s *Server) GetStats(ctx context.Context,
 				"invalid 'to' time format",
 			)
 		}
+
+		if to.Before(from) {
+			return nil, status.Error(
+				codes.InvalidArgument,
+				"'to' must be greater than or equal to 'from'",
+			)
+		}
 	}
 
-	totalRevenue, err := s.cfg.TransactionStore.GetTotalRevenue(ctx)
-	if err != nil {
-		log.Errorf("Error getting total revenue: %v", err)
-		return nil, status.Error(
-			codes.Internal, "failed to get revenue stats",
-		)
-	}
+	var (
+		totalRevenue int64
+		count        int64
+		err          error
+	)
+	if hasFrom {
+		totalRevenue, err = s.cfg.TransactionStore.
+			GetTotalRevenueByDateRange(ctx, from, to)
+		if err != nil {
+			log.Errorf("Error getting total revenue by date range: %v",
+				err)
+			return nil, status.Error(
+				codes.Internal, "failed to get revenue stats",
+			)
+		}
 
-	count, err := s.cfg.TransactionStore.CountTransactions(ctx)
-	if err != nil {
-		log.Errorf("Error getting transaction count: %v", err)
-		return nil, status.Error(
-			codes.Internal, "failed to get transaction count",
+		count, err = s.cfg.TransactionStore.CountTransactionsByDateRange(
+			ctx, from, to,
 		)
+		if err != nil {
+			log.Errorf("Error getting transaction count by date "+
+				"range: %v", err)
+			return nil, status.Error(
+				codes.Internal, "failed to get transaction count",
+			)
+		}
+	} else {
+		totalRevenue, err = s.cfg.TransactionStore.GetTotalRevenue(ctx)
+		if err != nil {
+			log.Errorf("Error getting total revenue: %v", err)
+			return nil, status.Error(
+				codes.Internal, "failed to get revenue stats",
+			)
+		}
+
+		count, err = s.cfg.TransactionStore.CountTransactions(ctx)
+		if err != nil {
+			log.Errorf("Error getting transaction count: %v", err)
+			return nil, status.Error(
+				codes.Internal, "failed to get transaction count",
+			)
+		}
 	}
 
 	revenueRows, err := s.cfg.TransactionStore.GetRevenueStats(
@@ -543,17 +574,9 @@ func (s *Server) GetStats(ctx context.Context,
 		[]*adminrpc.ServiceRevenue, 0, len(revenueRows),
 	)
 	for _, row := range revenueRows {
-		var rev int64
-		switch v := row.TotalRevenue.(type) {
-		case int64:
-			rev = v
-		case int32:
-			rev = int64(v)
-		}
-
 		breakdown = append(breakdown, &adminrpc.ServiceRevenue{
 			ServiceName:      row.ServiceName,
-			TotalRevenueSats: rev,
+			TotalRevenueSats: row.TotalRevenue,
 		})
 	}
 

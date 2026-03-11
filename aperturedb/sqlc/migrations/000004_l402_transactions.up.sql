@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS l402_transactions (
     token_id      BLOB NOT NULL,
     payment_hash  BLOB NOT NULL,
     service_name  TEXT NOT NULL,
-    price_sats    INTEGER NOT NULL,
+    price_sats    BIGINT NOT NULL,
     state         TEXT NOT NULL DEFAULT 'pending',
     created_at    TIMESTAMP NOT NULL,
     settled_at    TIMESTAMP

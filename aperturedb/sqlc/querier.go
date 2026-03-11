@@ -10,13 +10,16 @@ import (
 
 type Querier interface {
 	CountL402Transactions(ctx context.Context) (int64, error)
+	CountL402TransactionsByDateRange(ctx context.Context, arg CountL402TransactionsByDateRangeParams) (int64, error)
 	CountL402TransactionsByService(ctx context.Context, serviceName string) (int64, error)
 	DeleteL402TransactionByTokenID(ctx context.Context, tokenID []byte) (int64, error)
 	DeleteOnionPrivateKey(ctx context.Context) error
 	DeleteSecretByHash(ctx context.Context, hash []byte) (int64, error)
 	GetL402RevenueByService(ctx context.Context) ([]GetL402RevenueByServiceRow, error)
 	GetL402RevenueByServiceAndDateRange(ctx context.Context, arg GetL402RevenueByServiceAndDateRangeParams) ([]GetL402RevenueByServiceAndDateRangeRow, error)
-	GetL402TotalRevenue(ctx context.Context) (interface{}, error)
+	GetL402SettledTransactionByTokenID(ctx context.Context, tokenID []byte) (L402Transaction, error)
+	GetL402TotalRevenue(ctx context.Context) (int64, error)
+	GetL402TotalRevenueByDateRange(ctx context.Context, arg GetL402TotalRevenueByDateRangeParams) (int64, error)
 	GetL402TransactionByIdentifierHash(ctx context.Context, identifierHash []byte) (L402Transaction, error)
 	GetL402TransactionsByPaymentHash(ctx context.Context, paymentHash []byte) ([]L402Transaction, error)
 	GetSecretByHash(ctx context.Context, hash []byte) ([]byte, error)

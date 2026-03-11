@@ -528,8 +528,8 @@
           "type": "string"
         },
         "price_sats": {
-          "type": "integer",
-          "format": "int32"
+          "type": "string",
+          "format": "int64"
         },
         "state": {
           "type": "string"

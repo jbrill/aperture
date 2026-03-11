@@ -84,7 +84,7 @@ message Transaction {
   string token_id = 2;
   string payment_hash = 3;
   string service_name = 4;
-  int32 price_sats = 5;
+  int64 price_sats = 5;
   string state = 6;
   string created_at = 7;
   string settled_at = 8;

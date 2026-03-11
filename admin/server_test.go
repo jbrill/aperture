@@ -2,10 +2,19 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/lightninglabs/aperture/adminrpc"
+	"github.com/lightninglabs/aperture/aperturedb"
+	"github.com/lightninglabs/aperture/l402"
+	"github.com/lightninglabs/aperture/mint"
 	"github.com/lightninglabs/aperture/proxy"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,6 +40,97 @@ func newTestServer() *Server {
 			return nil
 		},
 	})
+}
+
+type mockSecretStore struct {
+	revoked map[[sha256.Size]byte]struct{}
+}
+
+var _ mint.SecretStore = (*mockSecretStore)(nil)
+
+func newMockSecretStore() *mockSecretStore {
+	return &mockSecretStore{
+		revoked: make(map[[sha256.Size]byte]struct{}),
+	}
+}
+
+func (m *mockSecretStore) NewSecret(_ context.Context,
+	_ [sha256.Size]byte) ([l402.SecretSize]byte, error) {
+
+	var secret [l402.SecretSize]byte
+	return secret, nil
+}
+
+func (m *mockSecretStore) GetSecret(_ context.Context,
+	_ [sha256.Size]byte) ([l402.SecretSize]byte, error) {
+
+	var secret [l402.SecretSize]byte
+	return secret, nil
+}
+
+func (m *mockSecretStore) RevokeSecret(_ context.Context,
+	id [sha256.Size]byte) error {
+
+	m.revoked[id] = struct{}{}
+	return nil
+}
+
+func newTestServerWithStores(t *testing.T) (*Server,
+	*aperturedb.L402TransactionsStore, *mockSecretStore) {
+
+	t.Helper()
+
+	db := aperturedb.NewTestDB(t)
+	dbTxer := aperturedb.NewTransactionExecutor(
+		db.BaseDB, func(tx *sql.Tx) aperturedb.L402TransactionsDB {
+			return db.WithTx(tx)
+		},
+	)
+	txStore := aperturedb.NewL402TransactionsStore(dbTxer)
+	secretStore := newMockSecretStore()
+
+	svc := []*proxy.Service{
+		{
+			Name:     "test-svc",
+			Address:  "localhost:8080",
+			Protocol: "http",
+			Price:    100,
+		},
+	}
+
+	server := NewServer(ServerConfig{
+		Network:          "regtest",
+		ListenAddr:       "localhost:9090",
+		Insecure:         true,
+		TransactionStore: txStore,
+		SecretStore:      secretStore,
+		Services: func() []*proxy.Service {
+			return svc
+		},
+		UpdateServices: func(s []*proxy.Service) error {
+			svc = s
+			return nil
+		},
+	})
+
+	return server, txStore, secretStore
+}
+
+func recordSettledTransaction(t *testing.T, store *aperturedb.L402TransactionsStore,
+	tokenID, paymentHash []byte, price int64) {
+
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	err := store.RecordTransaction(
+		ctx, tokenID, paymentHash, "test-svc", price, nil,
+	)
+	require.NoError(t, err)
+
+	err = store.SettleTransaction(ctx, paymentHash)
+	require.NoError(t, err)
 }
 
 func TestGetInfo(t *testing.T) {
@@ -206,4 +306,72 @@ func TestGetStatsNoStore(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not available")
+}
+
+func TestGetStatsDateRangeScopesTotals(t *testing.T) {
+	t.Parallel()
+
+	s, txStore, _ := newTestServerWithStores(t)
+
+	recordSettledTransaction(
+		t, txStore, []byte("token_stats"), []byte("hash_stats"), 500,
+	)
+
+	noRangeResp, err := s.GetStats(
+		context.Background(), &adminrpc.GetStatsRequest{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(500), noRangeResp.TotalRevenueSats)
+	require.Equal(t, int64(1), noRangeResp.TransactionCount)
+
+	from := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	to := time.Now().UTC().Add(25 * time.Hour).Format(time.RFC3339)
+	rangeResp, err := s.GetStats(context.Background(), &adminrpc.GetStatsRequest{
+		From: from,
+		To:   to,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), rangeResp.TotalRevenueSats)
+	require.Equal(t, int64(0), rangeResp.TransactionCount)
+	require.Len(t, rangeResp.ServiceBreakdown, 0)
+}
+
+func TestRevokeTokenBeyondOldScanLimit(t *testing.T) {
+	t.Parallel()
+
+	s, txStore, secretStore := newTestServerWithStores(t)
+
+	targetTokenID := []byte("token-0000")
+	targetHash := []byte("hash-0000")
+
+	for i := 0; i < 1001; i++ {
+		tokenID := []byte(fmt.Sprintf("token-%04d", i))
+		hash := []byte(fmt.Sprintf("hash-%04d", i))
+		recordSettledTransaction(t, txStore, tokenID, hash, 10)
+	}
+
+	resp, err := s.RevokeToken(context.Background(),
+		&adminrpc.RevokeTokenRequest{
+			TokenId: hex.EncodeToString(targetTokenID),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", resp.Status)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	_, err = txStore.GetSettledByTokenID(ctx, targetTokenID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no rows")
+
+	// Ensure secret revocation was attempted for the revoked token.
+	var paymentHash lntypes.Hash
+	copy(paymentHash[:], targetHash)
+	var token l402.TokenID
+	copy(token[:], targetTokenID)
+	idBytes := l402.EncodeIdentifierBytes(paymentHash, token)
+	idHash := sha256.Sum256(idBytes)
+	_, ok := secretStore.revoked[idHash]
+	require.True(t, ok)
 }

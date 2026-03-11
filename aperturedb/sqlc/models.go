@@ -14,7 +14,7 @@ type L402Transaction struct {
 	TokenID        []byte
 	PaymentHash    []byte
 	ServiceName    string
-	PriceSats      int32
+	PriceSats      int64
 	State          string
 	CreatedAt      time.Time
 	SettledAt      sql.NullTime
