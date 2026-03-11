@@ -375,8 +375,10 @@ func (a *Aperture) Start(errChan chan error, shutdown <-chan struct{}) error {
 	a.adminCleanup = adminCleanup
 
 	// Create the proxy and connect it to lnd.
+	mintTxnStore := asMintTransactionStore(txnStore)
 	a.proxy, a.proxyCleanup, err = createProxy(
-		a.cfg, a.challenger, secretStore, txnStore, adminServices...,
+		a.cfg, a.challenger, secretStore, mintTxnStore,
+		adminServices...,
 	)
 	if err != nil {
 		return err
@@ -896,7 +898,14 @@ func createAdminServer(cfg *Config,
 	updateServices func([]*proxy.Service) error) (
 	[]proxy.LocalService, func(), error) {
 
-	if cfg.Admin == nil || !cfg.Admin.Enabled || txnStore == nil {
+	if cfg.Admin == nil || !cfg.Admin.Enabled {
+		return nil, func() {}, nil
+	}
+
+	if txnStore == nil {
+		log.Warnf("Admin API is enabled but the transaction store " +
+			"is not available (etcd backend does not support " +
+			"it). Admin API will not start.")
 		return nil, func() {}, nil
 	}
 
