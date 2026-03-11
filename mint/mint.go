@@ -182,7 +182,10 @@ func (m *Mint) MintL402(ctx context.Context,
 		macID, idErr := l402.DecodeIdentifier(
 			bytes.NewReader(mac.Id()),
 		)
-		if idErr == nil {
+		if idErr != nil {
+			log.Errorf("Unable to decode minted macaroon identifier "+
+				"for transaction logging: %v", idErr)
+		} else {
 			serviceName := ""
 			if len(services) > 0 {
 				serviceName = services[0].Name
@@ -192,12 +195,15 @@ func (m *Mint) MintL402(ctx context.Context,
 			// transaction to the secrets table.
 			macIDHash := sha256.Sum256(mac.Id())
 
-			// nolint:errcheck
-			_ = m.cfg.TransactionStore.RecordTransaction(
+			err := m.cfg.TransactionStore.RecordTransaction(
 				ctx, macID.TokenID[:],
 				macID.PaymentHash[:], serviceName,
 				price, macIDHash[:],
 			)
+			if err != nil {
+				log.Errorf("Unable to record L402 transaction: %v",
+					err)
+			}
 		}
 	}
 

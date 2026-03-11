@@ -6,6 +6,7 @@ import (
 	"github.com/lightninglabs/aperture/auth"
 	"github.com/lightninglabs/aperture/challenger"
 	"github.com/lightninglabs/aperture/l402"
+	"github.com/lightninglabs/aperture/mint"
 	"github.com/lightninglabs/aperture/proxy"
 	"github.com/lightninglabs/lndclient"
 	"github.com/lightningnetwork/lnd"
@@ -29,6 +30,7 @@ func SetupLoggers(root *build.SubLoggerManager, intercept signal.Interceptor) {
 	lnd.SetSubLogger(root, Subsystem, log)
 	lnd.AddSubLogger(root, auth.Subsystem, intercept, auth.UseLogger)
 	lnd.AddSubLogger(root, l402.Subsystem, intercept, l402.UseLogger)
+	lnd.AddSubLogger(root, mint.Subsystem, intercept, mint.UseLogger)
 	lnd.AddSubLogger(root, proxy.Subsystem, intercept, proxy.UseLogger)
 	lnd.AddSubLogger(root, "LNDC", intercept, lndclient.UseLogger)
 	lnd.AddSubLogger(
